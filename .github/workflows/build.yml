@@ -91,6 +91,6 @@ jobs:
 
           gh release create "$VERSION" \
             --title "Development Build (Latest)" \
-            --notes "Automatic build from commit ${{ github.sha }}%0A%0A**Platforms:**%0A- Linux amd64%0A- Linux arm64%0A- Linux mipsle (极路由2 - 已禁用CGO，静态编译)%0A- Windows amd64" \
+            --notes "tide - 轻量守护脚本%0A%0ABuild from commit ${{ github.sha }}%0A%0A**Platforms:**%0A- Linux amd64%0A- Linux arm64%0A- Linux mipsle (CGO disabled, static build)%0A- Windows amd64" \
             --prerelease \
             artifacts/*
