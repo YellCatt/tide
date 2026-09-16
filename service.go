@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -270,7 +271,7 @@ func (s *Service) killLeftoverProcesses() {
 			if readProcComm(pid) != s.Cfg.BinaryName {
 				continue
 			}
-			if syscall.Kill(pid, syscall.SIGKILL) == nil {
+			if killProcess(pid) {
 				killed++
 			}
 		}
@@ -296,7 +297,19 @@ func (s *Service) isProcessAlive(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	return syscall.Kill(pid, 0) == nil
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return p.Signal(syscall.Signal(0)) == nil
+}
+
+func killProcess(pid int) bool {
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return p.Signal(syscall.SIGKILL) == nil
 }
 
 func (s *Service) readPidFile() (int, bool) {

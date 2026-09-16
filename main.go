@@ -275,7 +275,8 @@ services:
 `
 
 func ensureConfig(path string) error {
-	if _, err := os.Stat(path); err == nil {
+	_, err := os.Stat(path)
+	if err == nil {
 		return nil
 	}
 	if !os.IsNotExist(err) {
