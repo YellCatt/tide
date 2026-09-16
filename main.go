@@ -33,10 +33,11 @@ func logGlobal(msg string) {
 	_, _ = os.Stderr.WriteString(line)
 }
 
-func logGlobalStep(s string)  { logGlobal("【步骤】" + s) }
-func logGlobalOK(s string)    { logGlobal("【成功】✓ " + s) }
-func logGlobalWarn(s string)  { logGlobal("【警告】⚠ " + s) }
-func logGlobalError(s string) { logGlobal("【错误】✗ " + s) }
+func logGlobalf(level, s string) { logGlobal("[" + level + "] " + s) }
+func logGlobalStep(s string)  { logGlobalf("DEBUG", s) }
+func logGlobalOK(s string)    { logGlobalf("INFO", s) }
+func logGlobalWarn(s string)  { logGlobalf("WARN", s) }
+func logGlobalError(s string) { logGlobalf("ERROR", s) }
 
 func (s *Service) mainLoop(ctx context.Context) {
 	if err := s.startProgram(); err != nil {
@@ -162,6 +163,11 @@ func main() {
 		configPath = os.Args[1]
 	}
 
+	if err := ensureConfig(configPath); err != nil {
+		fmt.Fprintf(os.Stderr, "写入默认配置失败 (%s): %v\n", configPath, err)
+		os.Exit(1)
+	}
+
 	cfg, err := LoadConfig(configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "加载配置失败 (%s): %v\n", configPath, err)
@@ -225,4 +231,60 @@ func main() {
 
 	wg.Wait()
 	logGlobalOK("所有服务已退出，进程结束")
+}
+
+const defaultConfigYAML = `# tide 守护脚本配置文件
+# 时长字段支持 "120s" / "5m" / "2h"，也可以直接写秒数（如 120）
+
+defaults:
+  # 插件目录（每个服务可单独覆盖）
+  plugin_dir: /plugins/data/tide
+  # 最大下载重试次数
+  max_retry: 20
+  # 进程崩溃后的初始重启延迟（秒），每次失败翻倍直到 max_restart_delay
+  restart_delay: 5
+  # 最大重启延迟（秒）
+  max_restart_delay: 300
+  # 定时检查更新的间隔（秒）
+  update_interval: 14400
+  # 优雅退出等待时间（秒），超时后 SIGKILL
+  graceful_shutdown_timeout: 10
+  # HTTP 连接超时
+  connect_timeout: "120s"
+  # 单次下载最大耗时
+  max_download_time: "1200s"
+  # 网络就绪检测轮询间隔
+  network_check_interval: "5s"
+  # 下载重试之间的等待时间
+  download_retry_delay: "10s"
+  # 守护循环空闲轮询间隔
+  loop_idle_interval: "10s"
+
+services:
+  - name: glean
+    plugin_dir: /plugins/data/glean
+    download_url: https://github.com/YellCatt/glean/releases/download/dev-latest/default.glean_linux_mipsle
+
+  # 多服务示例（取消注释即可启用）
+  # - name: another-service
+  #   plugin_dir: /plugins/data/another
+  #   download_url: https://example.com/releases/latest/another_linux_amd64
+  #   update_interval: 3600
+  #   max_retry: 10
+  #   connect_timeout: "60s"
+`
+
+func ensureConfig(path string) error {
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+	if !os.IsNotExist(err) {
+		return err
+	}
+	logGlobal(fmt.Sprintf("未找到配置文件 %s，正在生成默认模板...", path))
+	if err := os.WriteFile(path, []byte(defaultConfigYAML), 0o644); err != nil {
+		return err
+	}
+	logGlobalOK(fmt.Sprintf("已生成默认配置: %s（请根据需要修改后重新运行）", path))
+	return nil
 }

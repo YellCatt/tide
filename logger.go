@@ -56,8 +56,9 @@ func (s *Service) logRaw(msg string) {
 	_, _ = os.Stderr.WriteString(line)
 }
 
-func (s *Service) logInfo(sth string)  { s.logRaw("【信息】" + sth) }
-func (s *Service) logOK(sth string)    { s.logRaw("【成功】✓ " + sth) }
-func (s *Service) logWarn(sth string)  { s.logRaw("【警告】⚠ " + sth) }
-func (s *Service) logError(sth string) { s.logRaw("【错误】✗ " + sth) }
-func (s *Service) logStep(sth string)  { s.logRaw("【步骤】" + sth) }
+func (s *Service) logRawf(level, msg string) { s.logRaw("[" + level + "] " + msg) }
+func (s *Service) logInfo(sth string)  { s.logRawf("INFO", sth) }
+func (s *Service) logOK(sth string)    { s.logRawf("DEBUG", sth) }
+func (s *Service) logWarn(sth string)  { s.logRawf("WARN", sth) }
+func (s *Service) logError(sth string) { s.logRawf("ERROR", sth) }
+func (s *Service) logStep(sth string)  { s.logRawf("DEBUG", sth) }
