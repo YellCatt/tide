@@ -1,61 +1,245 @@
 package main
 
 import (
+	"fmt"
+	"os"
 	"path/filepath"
-	"sync/atomic"
+	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
-// ============ 配置区 ============
-const (
-	// 插件目录
-	pluginDir = "/plugins/data/glean"
-	// 二进制文件名
-	binaryName = "glean"
-	// 下载临时文件名
-	tmpName = "glean.tmp"
-	// 下载地址
-	downloadURL = "https://github.com/YellCatt/glean/releases/download/dev-latest/default.glean_linux_mipsle"
+// Duration 支持 YAML 写法 "30s" / "5m" / "1h"，也兼容纯数字（秒）
+type Duration struct {
+	time.Duration
+}
 
-	// 最大下载重试次数
-	maxRetry = 20
-	// 重启初始延迟（秒）
-	restartDelay = 5
-	// 重启最大延迟（秒）
-	maxRestartDelay = 300
-	// 更新检查间隔（秒），14400 秒 = 4 小时
-	updateInterval = 14400
-	// 优雅退出等待时间（秒）
-	gracefulShutdownTimeout = 10
-	// 单次下载连接超时
-	connectTimeout = 120 * time.Second
-	// 单次下载最大耗时
-	maxDownloadTime = 1200 * time.Second
-	// 网络就绪轮询间隔
-	networkCheckInterval = 5 * time.Second
-	// 下载重试间隔
-	downloadRetryDelay = 10 * time.Second
-	// 主循环空闲轮询间隔
-	loopIdleInterval = 10 * time.Second
-	// 日志与记录中的时间格式（相当于 shell 的 '%Y-%m-%d %H:%M:%S %Z (UTC%z)'）
-	timeLayout = "2006-01-02 15:04:05 MST (UTC-0700)"
-)
+func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
+	var raw string
+	if err := value.Decode(&raw); err != nil {
+		var sec int64
+		if err2 := value.Decode(&sec); err2 == nil {
+			d.Duration = time.Duration(sec) * time.Second
+			return nil
+		}
+		return err
+	}
+	if strings.TrimSpace(raw) == "" {
+		d.Duration = 0
+		return nil
+	}
+	v, err := time.ParseDuration(raw)
+	if err != nil {
+		var sec int64
+		if err2 := yaml.Unmarshal([]byte(raw), &sec); err2 == nil {
+			d.Duration = time.Duration(sec) * time.Second
+			return nil
+		}
+		return fmt.Errorf("无法解析时长 %q: %w", raw, err)
+	}
+	d.Duration = v
+	return nil
+}
 
-// 文件路径（由 PLUGIN_DIR 推导）
-var (
-	logFilePath  = filepath.Join(pluginDir, "logs", "glean.log")
-	pidFilePath  = filepath.Join(pluginDir, "glean.pid")
-	binaryPath   = filepath.Join(pluginDir, binaryName)
-	tmpPath      = filepath.Join(pluginDir, tmpName)
-	updateRecord = filepath.Join(pluginDir, ".last_update_check")
-)
+// GlobalConfig 对应 YAML 根节点
+type GlobalConfig struct {
+	Defaults ServiceBase  `yaml:"defaults"`
+	Services []ServiceYAML `yaml:"services"`
+}
 
-// ============ 全局状态 ============
-var (
-	// 守护进程是否继续运行
-	running atomic.Bool
-	// 是否需要热更新
-	needUpdate atomic.Bool
-	// 当前重启延迟（秒）
-	currentDelay atomic.Int64
-)
+// ServiceBase 一组可覆盖的配置字段（指针区分"未设置"和"显式设为零值"）
+type ServiceBase struct {
+	PluginDir          string   `yaml:"plugin_dir"`
+	BinaryName         string   `yaml:"binary_name"`
+	TmpName            string   `yaml:"tmp_name"`
+	DownloadURL        string   `yaml:"download_url"`
+	MaxRetry           *int     `yaml:"max_retry"`
+	RestartDelay       *int     `yaml:"restart_delay"`
+	MaxRestartDelay    *int     `yaml:"max_restart_delay"`
+	UpdateInterval     *int     `yaml:"update_interval"`
+	GracefulShutdown   *int     `yaml:"graceful_shutdown_timeout"`
+	ConnectTimeout     *Duration `yaml:"connect_timeout"`
+	MaxDownloadTime    *Duration `yaml:"max_download_time"`
+	NetworkCheckInterval *Duration `yaml:"network_check_interval"`
+	DownloadRetryDelay   *Duration `yaml:"download_retry_delay"`
+	LoopIdleInterval    *Duration `yaml:"loop_idle_interval"`
+}
+
+// ServiceYAML YAML 里 services 数组的一项，name 必填
+type ServiceYAML struct {
+	Name string `yaml:"name"`
+	ServiceBase `yaml:",inline"`
+}
+
+// 最终展开后的服务配置快照（所有字段都是具体值，无指针）
+type ServiceConfig struct {
+	Name string
+
+	PluginDir       string
+	BinaryName      string
+	TmpName         string
+	DownloadURL     string
+	MaxRetry        int
+	RestartDelay    int
+	MaxRestartDelay int
+	UpdateInterval  int
+
+	GracefulShutdownTimeout time.Duration
+	ConnectTimeout          time.Duration
+	MaxDownloadTime         time.Duration
+	NetworkCheckInterval    time.Duration
+	DownloadRetryDelay      time.Duration
+	LoopIdleInterval        time.Duration
+
+	// 派生路径
+	LogFilePath  string
+	PidFilePath  string
+	BinaryPath   string
+	TmpPath      string
+	UpdateRecord string
+}
+
+func defaultBase() ServiceBase {
+	rd := 5
+	mrd := 300
+	ui := 14400
+	gs := 10
+	ct := Duration{120 * time.Second}
+	mdt := Duration{1200 * time.Second}
+	nci := Duration{5 * time.Second}
+	drd := Duration{10 * time.Second}
+	liid := Duration{10 * time.Second}
+	mr := 20
+	return ServiceBase{
+		PluginDir:          "",
+		BinaryName:         "",
+		TmpName:            "",
+		DownloadURL:        "",
+		MaxRetry:           &mr,
+		RestartDelay:       &rd,
+		MaxRestartDelay:    &mrd,
+		UpdateInterval:     &ui,
+		GracefulShutdown:   &gs,
+		ConnectTimeout:     &ct,
+		MaxDownloadTime:    &mdt,
+		NetworkCheckInterval: &nci,
+		DownloadRetryDelay:   &drd,
+		LoopIdleInterval:    &liid,
+	}
+}
+
+func mergeBase(dst, src ServiceBase) ServiceBase {
+	if src.PluginDir != "" {
+		dst.PluginDir = src.PluginDir
+	}
+	if src.BinaryName != "" {
+		dst.BinaryName = src.BinaryName
+	}
+	if src.TmpName != "" {
+		dst.TmpName = src.TmpName
+	}
+	if src.DownloadURL != "" {
+		dst.DownloadURL = src.DownloadURL
+	}
+	if src.MaxRetry != nil {
+		dst.MaxRetry = src.MaxRetry
+	}
+	if src.RestartDelay != nil {
+		dst.RestartDelay = src.RestartDelay
+	}
+	if src.MaxRestartDelay != nil {
+		dst.MaxRestartDelay = src.MaxRestartDelay
+	}
+	if src.UpdateInterval != nil {
+		dst.UpdateInterval = src.UpdateInterval
+	}
+	if src.GracefulShutdown != nil {
+		dst.GracefulShutdown = src.GracefulShutdown
+	}
+	if src.ConnectTimeout != nil {
+		dst.ConnectTimeout = src.ConnectTimeout
+	}
+	if src.MaxDownloadTime != nil {
+		dst.MaxDownloadTime = src.MaxDownloadTime
+	}
+	if src.NetworkCheckInterval != nil {
+		dst.NetworkCheckInterval = src.NetworkCheckInterval
+	}
+	if src.DownloadRetryDelay != nil {
+		dst.DownloadRetryDelay = src.DownloadRetryDelay
+	}
+	if src.LoopIdleInterval != nil {
+		dst.LoopIdleInterval = src.LoopIdleInterval
+	}
+	return dst
+}
+
+func (y ServiceYAML) ToConfig(defaults ServiceBase) (ServiceConfig, error) {
+	base := mergeBase(defaults, y.ServiceBase)
+
+	if y.Name == "" {
+		return ServiceConfig{}, fmt.Errorf("service.name 不能为空")
+	}
+	if base.PluginDir == "" {
+		return ServiceConfig{}, fmt.Errorf("service %q: plugin_dir 未设置", y.Name)
+	}
+
+	binaryName := base.BinaryName
+	if binaryName == "" {
+		binaryName = y.Name
+	}
+	tmpName := base.TmpName
+	if tmpName == "" {
+		tmpName = binaryName + ".tmp"
+	}
+
+	cfg := ServiceConfig{
+		Name:                    y.Name,
+		PluginDir:               base.PluginDir,
+		BinaryName:              binaryName,
+		TmpName:                 tmpName,
+		DownloadURL:             base.DownloadURL,
+		MaxRetry:                *base.MaxRetry,
+		RestartDelay:            *base.RestartDelay,
+		MaxRestartDelay:         *base.MaxRestartDelay,
+		UpdateInterval:          *base.UpdateInterval,
+		GracefulShutdownTimeout: baseDuration(base.GracefulShutdown, 0),
+		ConnectTimeout:          base.ConnectTimeout.Duration,
+		MaxDownloadTime:         base.MaxDownloadTime.Duration,
+		NetworkCheckInterval:    base.NetworkCheckInterval.Duration,
+		DownloadRetryDelay:      base.DownloadRetryDelay.Duration,
+		LoopIdleInterval:        base.LoopIdleInterval.Duration,
+		LogFilePath:             filepath.Join(base.PluginDir, "logs", binaryName+".log"),
+		PidFilePath:             filepath.Join(base.PluginDir, binaryName+".pid"),
+		BinaryPath:              filepath.Join(base.PluginDir, binaryName),
+		TmpPath:                 filepath.Join(base.PluginDir, tmpName),
+		UpdateRecord:            filepath.Join(base.PluginDir, ".last_update_check"),
+	}
+	return cfg, nil
+}
+
+func baseDuration(secPtr *int, fallback time.Duration) time.Duration {
+	if secPtr != nil {
+		return time.Duration(*secPtr) * time.Second
+	}
+	return fallback
+}
+
+func LoadConfig(path string) (GlobalConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return GlobalConfig{}, err
+	}
+	var raw GlobalConfig
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return GlobalConfig{}, fmt.Errorf("解析 YAML 失败: %w", err)
+	}
+
+	defaults := mergeBase(defaultBase(), raw.Defaults)
+
+	return GlobalConfig{
+		Defaults: defaults,
+		Services: raw.Services,
+	}, nil
+}

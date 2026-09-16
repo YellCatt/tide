@@ -14,27 +14,24 @@ import (
 	"time"
 )
 
-// ============ 网络就绪检测 ============
-// waitForNetwork 等价于 `while ! ping -c 1 -W 3 8.8.8.8; do sleep 5; done`
 func waitForNetwork(ctx context.Context) {
-	logStep("等待网络就绪...")
+	logGlobalStep("等待网络就绪...")
 	waited := 0
 	for {
 		if networkReady() {
-			logOK(fmt.Sprintf("网络已就绪 (累计等待 %d 秒)", waited))
+			logGlobalOK(fmt.Sprintf("网络已就绪 (累计等待 %d 秒)", waited))
 			return
 		}
 		waited += 5
 		if waited%15 == 0 {
-			logWarn(fmt.Sprintf("网络未就绪，已等待 %d 秒，继续等待...", waited))
+			logGlobalWarn(fmt.Sprintf("网络未就绪，已等待 %d 秒，继续等待...", waited))
 		}
-		if !sleepCtx(ctx, networkCheckInterval) {
+		if !sleepCtx(ctx, 5*time.Second) {
 			return
 		}
 	}
 }
 
-// networkReady 先尝试 ping，失败再退化到 TCP 探测（部分环境 ICMP 被禁但网络可用）。
 func networkReady() bool {
 	if path, err := exec.LookPath("ping"); err == nil {
 		cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -51,42 +48,36 @@ func networkReady() bool {
 	return true
 }
 
-// ============ 下载 ============
-func newHTTPClient() *http.Client {
+func (s *Service) newHTTPClient() *http.Client {
 	transport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
-			Timeout:   connectTimeout,
+			Timeout:   s.Cfg.ConnectTimeout,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
-		TLSHandshakeTimeout:   connectTimeout,
-		ResponseHeaderTimeout: connectTimeout,
+		TLSHandshakeTimeout:   s.Cfg.ConnectTimeout,
+		ResponseHeaderTimeout: s.Cfg.ConnectTimeout,
 		ExpectContinueTimeout: time.Second,
 		IdleConnTimeout:       90 * time.Second,
 		MaxIdleConns:          10,
-		// 等价于 curl -k：跳过证书校验
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		// 二进制下载，禁止透明压缩
-		DisableCompression: true,
+		TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
+		DisableCompression:    true,
 	}
 	return &http.Client{
 		Transport: transport,
-		// 等价于 curl --max-time：单次下载整体最大耗时
-		Timeout: maxDownloadTime,
+		Timeout:   s.Cfg.MaxDownloadTime,
 	}
 }
 
-var httpClient = newHTTPClient()
-
-// downloadToFile 等价于 curl -L -k --connect-timeout N --max-time M -s -o TMP URL
-func downloadToFile(ctx context.Context, dst, url string) (int64, error) {
+func (s *Service) downloadToFile(ctx context.Context, dst, url string) (int64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return 0, err
 	}
-	req.Header.Set("User-Agent", "glean-guard")
+	req.Header.Set("User-Agent", "tide")
 
-	resp, err := httpClient.Do(req)
+	client := s.newHTTPClient()
+	resp, err := client.Do(req)
 	if err != nil {
 		return 0, err
 	}
@@ -117,52 +108,49 @@ func downloadToFile(ctx context.Context, dst, url string) (int64, error) {
 	return written, nil
 }
 
-// downloadBinary 下载到临时文件并在成功后 chmod +x，失败自动重试。
-func downloadBinary(ctx context.Context) bool {
-	logStep("尝试从 GitHub 下载最新版本...")
-	_ = os.Remove(tmpPath)
+func (s *Service) downloadBinary(ctx context.Context) bool {
+	s.logStep("尝试从 GitHub 下载最新版本...")
+	_ = os.Remove(s.Cfg.TmpPath)
 
-	for retry := 1; retry <= maxRetry; retry++ {
+	for retry := 1; retry <= s.Cfg.MaxRetry; retry++ {
 		startWall := time.Now().Format("2006-01-02 15:04:05")
-		logInfo(fmt.Sprintf("第 %d / %d 次下载尝试，开始时刻:%s (连接超时 %ds, 最大耗时 %ds)",
-			retry, maxRetry, startWall,
-			int(connectTimeout.Seconds()), int(maxDownloadTime.Seconds())))
+		s.logInfo(fmt.Sprintf("第 %d / %d 次下载尝试，开始时刻:%s (连接超时 %ds, 最大耗时 %ds)",
+			retry, s.Cfg.MaxRetry, startWall,
+			int(s.Cfg.ConnectTimeout.Seconds()), int(s.Cfg.MaxDownloadTime.Seconds())))
 
-		size, err := downloadToFile(ctx, tmpPath, downloadURL)
+		size, err := s.downloadToFile(ctx, s.Cfg.TmpPath, s.Cfg.DownloadURL)
 
 		endWall := time.Now().Format("2006-01-02 15:04:05")
 		if err == nil {
-			logInfo(fmt.Sprintf("第 %d 次下载结束时刻:%s, 结果=成功", retry, endWall))
+			s.logInfo(fmt.Sprintf("第 %d 次下载结束时刻:%s, 结果=成功", retry, endWall))
 		} else {
-			logInfo(fmt.Sprintf("第 %d 次下载结束时刻:%s, 结果=失败", retry, endWall))
+			s.logInfo(fmt.Sprintf("第 %d 次下载结束时刻:%s, 结果=失败", retry, endWall))
 		}
 
 		if err == nil {
-			if chmodErr := os.Chmod(tmpPath, 0o755); chmodErr != nil {
-				logError(fmt.Sprintf("添加执行权限失败: %v", chmodErr))
-				_ = os.Remove(tmpPath)
+			if chmodErr := os.Chmod(s.Cfg.TmpPath, 0o755); chmodErr != nil {
+				s.logError(fmt.Sprintf("添加执行权限失败: %v", chmodErr))
+				_ = os.Remove(s.Cfg.TmpPath)
 				continue
 			}
-			logOK(fmt.Sprintf("下载成功，文件大小: %s，已添加执行权限", humanSize(size)))
+			s.logOK(fmt.Sprintf("下载成功，文件大小: %s，已添加执行权限", humanSize(size)))
 			return true
 		}
 
-		logError(fmt.Sprintf("下载失败: %v", err))
-		_ = os.Remove(tmpPath)
-		if retry < maxRetry {
-			logInfo(fmt.Sprintf("等待 %d 秒后重试...", int(downloadRetryDelay.Seconds())))
-			if !sleepCtx(ctx, downloadRetryDelay) {
+		s.logError(fmt.Sprintf("下载失败: %v", err))
+		_ = os.Remove(s.Cfg.TmpPath)
+		if retry < s.Cfg.MaxRetry {
+			s.logInfo(fmt.Sprintf("等待 %d 秒后重试...", int(s.Cfg.DownloadRetryDelay.Seconds())))
+			if !sleepCtx(ctx, s.Cfg.DownloadRetryDelay) {
 				return false
 			}
 		}
 	}
 
-	logError(fmt.Sprintf("已达到最大重试次数 (%d)，下载失败", maxRetry))
+	s.logError(fmt.Sprintf("已达到最大重试次数 (%d)，下载失败", s.Cfg.MaxRetry))
 	return false
 }
 
-// ============ 工具函数 ============
-// fileEquals 等价于 `cmp -s a b`
 func fileEquals(a, b string) bool {
 	fa, err := os.Open(a)
 	if err != nil {
@@ -204,7 +192,6 @@ func fileEquals(a, b string) bool {
 	}
 }
 
-// humanSize 等价于 `ls -lh` 的大小列
 func humanSize(n int64) string {
 	const unit = 1024
 	if n < unit {

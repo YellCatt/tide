@@ -1,0 +1,24 @@
+defaults:
+  plugin_dir: /plugins/data/tide
+  max_retry: 20
+  restart_delay: 5
+  max_restart_delay: 300
+  update_interval: 14400
+  graceful_shutdown_timeout: 10
+  connect_timeout: "120s"
+  max_download_time: "1200s"
+  network_check_interval: "5s"
+  download_retry_delay: "10s"
+  loop_idle_interval: "10s"
+
+services:
+  - name: glean
+    plugin_dir: /plugins/data/glean
+    download_url: https://github.com/YellCatt/glean/releases/download/dev-latest/default.glean_linux_mipsle
+
+  - name: another-service
+    plugin_dir: /plugins/data/another
+    download_url: https://example.com/releases/latest/another_linux_amd64
+    update_interval: 3600
+    max_retry: 10
+    connect_timeout: "60s"

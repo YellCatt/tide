@@ -9,54 +9,6 @@ import (
 	"time"
 )
 
-// ============ .last_update_check 解析 ============
-// 新格式：last_check_ts|last_human|next_check_ts_num|next_check_human
-// 兼容旧 3 字段 / 旧 2 字段自动升级。
-func parseUpdateFile() (lastTS int64, lastHuman string, nextTS int64, nextHuman string) {
-	data, err := os.ReadFile(updateRecord)
-	if err != nil {
-		return 0, "", 0, ""
-	}
-	line := strings.TrimSpace(string(data))
-	fields := strings.Split(line, "|")
-
-	atoi := func(s string) int64 {
-		v, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
-		if err != nil {
-			return 0
-		}
-		return v
-	}
-
-	switch {
-	case len(fields) >= 4: // 4 字段新格式
-		lastTS = atoi(fields[0])
-		lastHuman = strings.TrimSpace(fields[1])
-		nextTS = atoi(fields[2])
-		nextHuman = strings.TrimSpace(fields[3])
-	case len(fields) == 3: // 旧 3 字段：last|last_h|next_num
-		lastTS = atoi(fields[0])
-		lastHuman = strings.TrimSpace(fields[1])
-		nextTS = atoi(fields[2])
-		nextHuman = "(未记录，旧配置)"
-	case len(fields) == 2: // 旧 2 字段
-		lastTS = atoi(fields[0])
-		lastHuman = strings.TrimSpace(fields[1])
-		nextTS = lastTS + updateInterval
-		nextHuman = "(未记录，旧配置)"
-	default:
-		return 0, "", 0, ""
-	}
-	return lastTS, lastHuman, nextTS, nextHuman
-}
-
-func writeUpdateRecord(lastTS int64, lastHuman string, nextTS int64, nextHuman string) {
-	content := fmt.Sprintf("%d|%s|%d|%s\n", lastTS, lastHuman, nextTS, nextHuman)
-	if err := os.WriteFile(updateRecord, []byte(content), 0o644); err != nil {
-		logWarn(fmt.Sprintf("写入更新记录失败: %v", err))
-	}
-}
-
 func humanNow() string {
 	return time.Now().Format(timeLayout)
 }
@@ -65,7 +17,6 @@ func humanUnix(ts int64) string {
 	return time.Unix(ts, 0).Format(timeLayout)
 }
 
-// ============ 将秒数转换为人类可读的时长 ============
 func formatDuration(total int64) string {
 	if total < 0 {
 		total = 0
@@ -91,60 +42,100 @@ func formatDuration(total int64) string {
 	return b.String()
 }
 
-// ============ 更新检查 ============
-// checkAndUpdate 到点才检查更新，下载成功且内容变化时置 NEED_UPDATE。
-func checkAndUpdate(ctx context.Context) bool {
-	now := time.Now().Unix()
-	lastTS, _, nextTS, _ := parseUpdateFile()
+func (s *Service) parseUpdateFile() (lastTS int64, lastHuman string, nextTS int64, nextHuman string) {
+	data, err := os.ReadFile(s.Cfg.UpdateRecord)
+	if err != nil {
+		return 0, "", 0, ""
+	}
+	line := strings.TrimSpace(string(data))
+	fields := strings.Split(line, "|")
 
-	// 调度判断只使用数字时间戳
+	atoi := func(st string) int64 {
+		v, err := strconv.ParseInt(strings.TrimSpace(st), 10, 64)
+		if err != nil {
+			return 0
+		}
+		return v
+	}
+
+	switch {
+	case len(fields) >= 4:
+		lastTS = atoi(fields[0])
+		lastHuman = strings.TrimSpace(fields[1])
+		nextTS = atoi(fields[2])
+		nextHuman = strings.TrimSpace(fields[3])
+	case len(fields) == 3:
+		lastTS = atoi(fields[0])
+		lastHuman = strings.TrimSpace(fields[1])
+		nextTS = atoi(fields[2])
+		nextHuman = "(未记录，旧配置)"
+	case len(fields) == 2:
+		lastTS = atoi(fields[0])
+		lastHuman = strings.TrimSpace(fields[1])
+		nextTS = lastTS + int64(s.Cfg.UpdateInterval)
+		nextHuman = "(未记录，旧配置)"
+	default:
+		return 0, "", 0, ""
+	}
+	return lastTS, lastHuman, nextTS, nextHuman
+}
+
+func (s *Service) writeUpdateRecord(lastTS int64, lastHuman string, nextTS int64, nextHuman string) {
+	content := fmt.Sprintf("%d|%s|%d|%s\n", lastTS, lastHuman, nextTS, nextHuman)
+	if err := os.WriteFile(s.Cfg.UpdateRecord, []byte(content), 0o644); err != nil {
+		s.logWarn(fmt.Sprintf("写入更新记录失败: %v", err))
+	}
+}
+
+func (s *Service) checkAndUpdate(ctx context.Context) bool {
+	now := time.Now().Unix()
+	lastTS, _, nextTS, _ := s.parseUpdateFile()
+
 	if now < nextTS {
 		return true
 	}
 
 	elapsed := now - lastTS
-	logStep(fmt.Sprintf("距离上次更新已 %s，开始下载最新版本...", formatDuration(elapsed)))
+	s.logStep(fmt.Sprintf("距离上次更新已 %s，开始下载最新版本...", formatDuration(elapsed)))
 
 	newLastTS := now
 	newLastHuman := humanNow()
-	newNextTS := newLastTS + updateInterval
+	newNextTS := newLastTS + int64(s.Cfg.UpdateInterval)
 	newNextHuman := humanUnix(newNextTS)
 
-	writeUpdateRecord(newLastTS, newLastHuman, newNextTS, newNextHuman)
-	logInfo(fmt.Sprintf("本次更新检查完成，预计下次更新检查: %s (ts=%d)", newNextHuman, newNextTS))
+	s.writeUpdateRecord(newLastTS, newLastHuman, newNextTS, newNextHuman)
+	s.logInfo(fmt.Sprintf("本次更新检查完成，预计下次更新检查: %s (ts=%d)", newNextHuman, newNextTS))
 
-	if !downloadBinary(ctx) {
-		logWarn("下载失败，继续使用当前版本")
+	if !s.downloadBinary(ctx) {
+		s.logWarn("下载失败，继续使用当前版本")
 		return false
 	}
 
-	if _, err := os.Stat(binaryPath); err == nil {
-		if fileEquals(tmpPath, binaryPath) {
-			logInfo("下载的文件与当前版本一致，无需替换")
-			_ = os.Remove(tmpPath)
+	if _, err := os.Stat(s.Cfg.BinaryPath); err == nil {
+		if fileEquals(s.Cfg.TmpPath, s.Cfg.BinaryPath) {
+			s.logInfo("下载的文件与当前版本一致，无需替换")
+			_ = os.Remove(s.Cfg.TmpPath)
 			return true
 		}
-		logInfo("下载的文件与当前版本不同，准备替换")
+		s.logInfo("下载的文件与当前版本不同，准备替换")
 	} else {
-		logInfo("当前无旧版本，直接启用新版本")
+		s.logInfo("当前无旧版本，直接启用新版本")
 	}
 
-	needUpdate.Store(true)
+	s.needUpdate.Store(true)
 	return true
 }
 
-// applyUpdate 用下载好的临时文件替换正式二进制
-func applyUpdate() error {
-	if err := os.Rename(tmpPath, binaryPath); err != nil {
+func (s *Service) applyUpdate() error {
+	if err := os.Rename(s.Cfg.TmpPath, s.Cfg.BinaryPath); err != nil {
 		return err
 	}
-	return os.Chmod(binaryPath, 0o755)
+	return os.Chmod(s.Cfg.BinaryPath, 0o755)
 }
 
-// initUpdateRecord 初始化 4 字段更新记录
-func initUpdateRecord() {
+func (s *Service) initUpdateRecord() {
 	now := time.Now().Unix()
-	next := now + updateInterval
-	writeUpdateRecord(now, humanNow(), next, humanUnix(next))
-	logInfo(fmt.Sprintf("初始化更新记录，预计下次更新检查: %s (ts=%d)", humanUnix(next), next))
+	next := now + int64(s.Cfg.UpdateInterval)
+	s.writeUpdateRecord(now, humanNow(), next, humanUnix(next))
+	s.logInfo(fmt.Sprintf("初始化更新记录，预计下次更新检查: %s (ts=%d)", humanUnix(next), next))
 }

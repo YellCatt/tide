@@ -5,70 +5,59 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 )
 
-var (
-	logMu     sync.Mutex
-	logHandle *os.File
-)
-
-// initLog 打开日志文件（追加写）；失败时日志退回标准错误。
-// 预创建目录，确保早期日志能写入。
-func initLog() {
-	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
-		fmt.Fprintf(os.Stderr, "创建插件目录失败: %v\n", err)
+func (s *Service) initLog() {
+	if err := os.MkdirAll(s.Cfg.PluginDir, 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "创建插件目录失败 [%s]: %v\n", s.Cfg.Name, err)
 	}
-	if err := os.MkdirAll(filepath.Dir(logFilePath), 0o755); err != nil {
-		fmt.Fprintf(os.Stderr, "创建日志目录失败: %v\n", err)
+	if err := os.MkdirAll(filepath.Dir(s.Cfg.LogFilePath), 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "创建日志目录失败 [%s]: %v\n", s.Cfg.Name, err)
 	}
-	f, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(s.Cfg.LogFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "打开日志文件失败: %v，日志将输出到标准错误\n", err)
+		fmt.Fprintf(os.Stderr, "打开日志文件失败 [%s]: %v，日志将输出到标准错误\n", s.Cfg.Name, err)
 		return
 	}
-	logHandle = f
+	s.logFile = f
 }
 
-func closeLog() {
-	logMu.Lock()
-	defer logMu.Unlock()
-	if logHandle != nil {
-		_ = logHandle.Close()
-		logHandle = nil
+func (s *Service) closeLog() {
+	s.logMu.Lock()
+	defer s.logMu.Unlock()
+	if s.logFile != nil {
+		_ = s.logFile.Close()
+		s.logFile = nil
 	}
 }
 
-// logWriter 供子进程 stdout/stderr 复用同一个日志文件（写入加锁）。
-type logWriterT struct{}
+type serviceLogWriter struct{ s *Service }
 
-func (logWriterT) Write(p []byte) (int, error) {
-	logMu.Lock()
-	defer logMu.Unlock()
-	if logHandle != nil {
-		return logHandle.Write(p)
+func (w serviceLogWriter) Write(p []byte) (int, error) {
+	w.s.logMu.Lock()
+	defer w.s.logMu.Unlock()
+	if w.s.logFile != nil {
+		return w.s.logFile.Write(p)
 	}
 	return os.Stderr.Write(p)
 }
 
-// childLogWriter 返回子进程可用的日志写入器
-func childLogWriter() io.Writer { return logWriterT{} }
+func (s *Service) childLogWriter() io.Writer { return serviceLogWriter{s: s} }
 
-// ============ 日志函数 ============
-func logRaw(msg string) {
-	line := fmt.Sprintf("[%s] %s\n", time.Now().Format("2006-01-02 15:04:05"), msg)
-	logMu.Lock()
-	defer logMu.Unlock()
-	if logHandle != nil {
-		_, _ = logHandle.WriteString(line)
+func (s *Service) logRaw(msg string) {
+	line := fmt.Sprintf("[%s] [%s] %s\n", time.Now().Format("2006-01-02 15:04:05"), s.Cfg.Name, msg)
+	s.logMu.Lock()
+	defer s.logMu.Unlock()
+	if s.logFile != nil {
+		_, _ = s.logFile.WriteString(line)
 		return
 	}
 	_, _ = os.Stderr.WriteString(line)
 }
 
-func logInfo(s string)  { logRaw("【信息】" + s) }
-func logOK(s string)    { logRaw("【成功】✓ " + s) }
-func logWarn(s string)  { logRaw("【警告】⚠ " + s) }
-func logError(s string) { logRaw("【错误】✗ " + s) }
-func logStep(s string)  { logRaw("【步骤】" + s) }
+func (s *Service) logInfo(sth string)  { s.logRaw("【信息】" + sth) }
+func (s *Service) logOK(sth string)    { s.logRaw("【成功】✓ " + sth) }
+func (s *Service) logWarn(sth string)  { s.logRaw("【警告】⚠ " + sth) }
+func (s *Service) logError(sth string) { s.logRaw("【错误】✗ " + sth) }
+func (s *Service) logStep(sth string)  { s.logRaw("【步骤】" + sth) }
