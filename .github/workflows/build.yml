@@ -53,14 +53,14 @@ jobs:
       run: |
         VERSION="v1.0.0_$(TZ=Asia/Shanghai date +%Y%m%d-%H%M)"
         echo "Building version: $VERSION"
-        ${{ matrix.target.goflags }} go build -ldflags="${{ matrix.target.ldflags }}" ${{ matrix.target.tags != '' && format('-tags="{0}"', matrix.target.tags) || '' }} -o glean_${{ matrix.target.suffix }}.${{ matrix.target.os == 'windows' && 'exe' || '' }}
-        ls -la glean_*
+        ${{ matrix.target.goflags }} go build -ldflags="${{ matrix.target.ldflags }}" ${{ matrix.target.tags != '' && format('-tags="{0}"', matrix.target.tags) || '' }} -o tide_${{ matrix.target.suffix }}.${{ matrix.target.os == 'windows' && 'exe' || '' }}
+        ls -la tide_*
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: glean_${{ matrix.target.suffix }}
-        path: glean_${{ matrix.target.suffix }}.*
+        name: tide_${{ matrix.target.suffix }}
+        path: tide_${{ matrix.target.suffix }}.*
 
   release:
     needs: build
