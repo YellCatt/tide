@@ -1,5 +1,6 @@
 name: Build and Release
 
+# 触发条件: push 到 main 分支自动构建，或手动点 "Run workflow"
 on:
   push:
     branches: [ main ]
@@ -9,26 +10,35 @@ jobs:
   build:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         target:
+          # ---- Linux mipsle (极路由/嵌入式设备) ----
+          # CGO_ENABLED=0 + netgo 纯 Go 实现，静态编译，无外部依赖
           - os: linux
             arch: mipsle
             suffix: linux_mipsle
             goflags: CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat
             ldflags: "-s -w -extldflags=-static"
             tags: "netgo osusergo"
+
+          # ---- Linux amd64 ----
           - os: linux
             arch: amd64
             suffix: linux_amd64
             goflags: GOOS=linux GOARCH=amd64
             ldflags: "-s -w"
             tags: ""
+
+          # ---- Linux arm64 ----
           - os: linux
             arch: arm64
             suffix: linux_arm64
             goflags: GOOS=linux GOARCH=arm64
             ldflags: "-s -w"
             tags: ""
+
+          # ---- Windows amd64 ----
           - os: windows
             arch: amd64
             suffix: windows_amd64
@@ -44,11 +54,13 @@ jobs:
       with:
         go-version: '1.21'
 
+    # go mod tidy 确保依赖完整
     - name: Fix go modules
       run: |
         go clean -modcache
         go mod tidy
 
+    # -s -w 去掉符号表和调试信息，减小体积
     - name: Build for ${{ matrix.target.os }}/${{ matrix.target.arch }}
       run: |
         VERSION="v1.0.0_$(TZ=Asia/Shanghai date +%Y%m%d-%H%M)"
@@ -56,12 +68,14 @@ jobs:
         ${{ matrix.target.goflags }} go build -ldflags="${{ matrix.target.ldflags }}" ${{ matrix.target.tags != '' && format('-tags="{0}"', matrix.target.tags) || '' }} -o tide_${{ matrix.target.suffix }}.${{ matrix.target.os == 'windows' && 'exe' || '' }}
         ls -la tide_*
 
+    # 每个平台单独上传一个 artifact
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: tide_${{ matrix.target.suffix }}
         path: tide_${{ matrix.target.suffix }}.*
 
+  # 等所有平台都构建完，统一创建/更新 dev-latest Release
   release:
     needs: build
     runs-on: ubuntu-latest
@@ -71,6 +85,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # download-artifact 默认每个平台一个目录，merge-multiple 把所有文件摊平到 artifacts/
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -80,12 +95,13 @@ jobs:
       - name: List downloaded artifacts
         run: ls -la artifacts/
 
+      # 使用固定 tag dev-latest，每次先删旧的再重建，这样 Release 页面永远是最新构建
       - name: Create or Update Dev Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="dev-latest"
-          echo "使用固定版本tag: $VERSION"
+          echo "Using fixed release tag: $VERSION"
 
           gh release delete "$VERSION" --yes 2>/dev/null || true
 
