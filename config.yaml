@@ -19,6 +19,3 @@ services:
   - name: another-service
     plugin_dir: /plugins/data/another
     download_url: https://example.com/releases/latest/another_linux_amd64
-    update_interval: 3600
-    max_retry: 10
-    connect_timeout: "60s"
