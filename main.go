@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"reflect"
 	"sync"
 	"syscall"
 	"time"
@@ -16,6 +18,8 @@ var (
 	cleanupOne sync.Once
 	timeLayout = "2006-01-02 15:04:05 MST"
 )
+
+const configReloadInterval = 10 * time.Second
 
 func sleepCtx(ctx context.Context, d time.Duration) bool {
 	t := time.NewTimer(d)
@@ -157,11 +161,167 @@ func (s *Service) fatalExit(msg string) {
 	s.closeLog()
 }
 
+type serviceEntry struct {
+	svc *Service
+	wg  *sync.WaitGroup
+	cfg ServiceConfig
+}
+
+type serviceManager struct {
+	mu      sync.Mutex
+	entries map[string]*serviceEntry
+}
+
+func newServiceManager() *serviceManager {
+	return &serviceManager{entries: make(map[string]*serviceEntry)}
+}
+
+func (m *serviceManager) startService(svcCfg ServiceConfig) {
+	svc := NewService(svcCfg)
+	wg := &sync.WaitGroup{}
+	wg.Add(1)
+	go func(s *Service, w *sync.WaitGroup) {
+		defer w.Done()
+		defer func() {
+			s.killProgram()
+			_ = os.Remove(s.Cfg.PidFilePath)
+			_ = os.Remove(s.Cfg.TmpPath)
+			s.closeLog()
+		}()
+		s.run(appCtx)
+	}(svc, wg)
+
+	m.mu.Lock()
+	m.entries[svcCfg.Name] = &serviceEntry{svc: svc, wg: wg, cfg: svcCfg}
+	m.mu.Unlock()
+
+	logGlobalOK(fmt.Sprintf("服务已启动: %s", svcCfg.Name))
+}
+
+func (m *serviceManager) stopService(name string) {
+	m.mu.Lock()
+	entry, ok := m.entries[name]
+	if !ok {
+		m.mu.Unlock()
+		return
+	}
+	delete(m.entries, name)
+	m.mu.Unlock()
+
+	logGlobal(fmt.Sprintf("正在停止服务: %s", name))
+	entry.svc.Stop()
+	entry.wg.Wait()
+	logGlobalOK(fmt.Sprintf("服务已停止: %s", name))
+}
+
+func (m *serviceManager) stopAll() {
+	m.mu.Lock()
+	names := make([]string, 0, len(m.entries))
+	for name := range m.entries {
+		names = append(names, name)
+	}
+	m.mu.Unlock()
+
+	for _, name := range names {
+		m.stopService(name)
+	}
+}
+
+func (m *serviceManager) reload(newCfg GlobalConfig) {
+	newMap := make(map[string]ServiceConfig)
+	for _, svcYAML := range newCfg.Services {
+		svcCfg, err := svcYAML.ToConfig(newCfg.Defaults)
+		if err != nil {
+			logGlobalError(fmt.Sprintf("配置热重载: 服务 %q 配置错误: %v，跳过", svcYAML.Name, err))
+			continue
+		}
+		if !svcCfg.Enabled {
+			logGlobal(fmt.Sprintf("配置热重载: 服务 %s 已禁用，跳过", svcYAML.Name))
+			continue
+		}
+		newMap[svcYAML.Name] = svcCfg
+	}
+
+	m.mu.Lock()
+	oldNames := make(map[string]bool)
+	for name := range m.entries {
+		oldNames[name] = true
+	}
+	newNames := make(map[string]bool)
+	for name := range newMap {
+		newNames[name] = true
+	}
+	m.mu.Unlock()
+
+	for name := range oldNames {
+		if !newNames[name] {
+			logGlobal(fmt.Sprintf("配置变更: 停止服务 %s", name))
+			m.stopService(name)
+		}
+	}
+
+	for name, newSvcCfg := range newMap {
+		if oldNames[name] {
+			m.mu.Lock()
+			entry := m.entries[name]
+			m.mu.Unlock()
+			if entry != nil && !reflect.DeepEqual(entry.cfg, newSvcCfg) {
+				logGlobal(fmt.Sprintf("配置变更: 重启服务 %s（配置已更新）", name))
+				m.stopService(name)
+				m.startService(newSvcCfg)
+			}
+		} else {
+			logGlobal(fmt.Sprintf("配置变更: 启动服务 %s", name))
+			m.startService(newSvcCfg)
+		}
+	}
+}
+
+func configModTime(path string) (time.Time, error) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return st.ModTime(), nil
+}
+
+func watchConfig(ctx context.Context, path string, mgr *serviceManager, initialModTime time.Time) {
+	lastMod := initialModTime
+	ticker := time.NewTicker(configReloadInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			mod, err := configModTime(path)
+			if err != nil {
+				logGlobalWarn(fmt.Sprintf("检查配置文件失败: %v", err))
+				continue
+			}
+			if !mod.Equal(lastMod) {
+				lastMod = mod
+				logGlobal(fmt.Sprintf("检测到配置文件变更 (%s)，重新加载...", path))
+
+				cfg, err := LoadConfig(path)
+				if err != nil {
+					logGlobalError(fmt.Sprintf("重新加载配置失败: %v", err))
+					continue
+				}
+				mgr.reload(cfg)
+				logGlobalOK("配置热重载完成")
+			}
+		}
+	}
+}
+
 func main() {
 	configPath := "config.yaml"
 	if len(os.Args) >= 2 {
 		configPath = os.Args[1]
 	}
+	absConfigPath, _ := filepath.Abs(configPath)
 
 	if err := ensureConfig(configPath); err != nil {
 		fmt.Fprintf(os.Stderr, "写入默认配置失败 (%s): %v\n", configPath, err)
@@ -188,48 +348,52 @@ func main() {
 	}()
 
 	logGlobalStep("加载配置完成")
-	logGlobal(fmt.Sprintf("配置文件: %s", configPath))
-	logGlobal(fmt.Sprintf("定义服务数: %d", len(cfg.Services)))
+	logGlobal(fmt.Sprintf("配置文件: %s", absConfigPath))
+	logGlobal(fmt.Sprintf("配置热重载检查间隔: %v", configReloadInterval))
 
-	if len(cfg.Services) == 0 {
-		logGlobalError("services 列表为空，没有需要守护的服务")
-		os.Exit(1)
-	}
-
-	configs := make([]ServiceConfig, 0, len(cfg.Services))
+	svcCfgs := make([]ServiceConfig, 0, len(cfg.Services))
+	disabledCount := 0
 	for _, svcYAML := range cfg.Services {
 		svcCfg, err := svcYAML.ToConfig(cfg.Defaults)
 		if err != nil {
 			logGlobalError(fmt.Sprintf("服务配置错误: %v", err))
 			os.Exit(1)
 		}
-		configs = append(configs, svcCfg)
-		logGlobal(fmt.Sprintf("  + %s -> %s", svcCfg.Name, svcCfg.PluginDir))
+		svcCfgs = append(svcCfgs, svcCfg)
+		state := "启用"
+		if !svcCfg.Enabled {
+			state = "禁用"
+			disabledCount++
+		}
+		logGlobal(fmt.Sprintf("  + %s -> %s [%s]", svcCfg.Name, svcCfg.PluginDir, state))
+	}
+
+	enabledCount := len(svcCfgs) - disabledCount
+	logGlobal(fmt.Sprintf("定义服务数: %d（启用: %d, 禁用: %d）", len(svcCfgs), enabledCount, disabledCount))
+
+	if enabledCount == 0 {
+		logGlobalError("没有任何启用的服务，退出")
+		os.Exit(1)
 	}
 
 	waitForNetwork(appCtx)
 	logGlobal("========================================")
 
-	services := make([]*Service, 0, len(configs))
-	var wg sync.WaitGroup
-
-	for _, svcCfg := range configs {
-		svc := NewService(svcCfg)
-		services = append(services, svc)
-		wg.Add(1)
-		go func(s *Service) {
-			defer wg.Done()
-			defer func() {
-				s.killProgram()
-				_ = os.Remove(s.Cfg.PidFilePath)
-				_ = os.Remove(s.Cfg.TmpPath)
-				s.closeLog()
-			}()
-			s.run(appCtx)
-		}(svc)
+	mgr := newServiceManager()
+	for _, sc := range svcCfgs {
+		if sc.Enabled {
+			mgr.startService(sc)
+		}
 	}
 
-	wg.Wait()
+	go func() {
+		mod, _ := configModTime(absConfigPath)
+		watchConfig(appCtx, absConfigPath, mgr, mod)
+	}()
+
+	<-appCtx.Done()
+	logGlobal("正在停止所有服务...")
+	mgr.stopAll()
 	logGlobalOK("所有服务已退出，进程结束")
 }
 
@@ -237,6 +401,8 @@ const defaultConfigYAML = `# tide 守护脚本配置文件
 # 时长字段支持 "120s" / "5m" / "2h"，也可以直接写秒数（如 120）
 
 defaults:
+  # 全局启用开关（每个服务可单独覆盖为 false 来禁用）
+  enabled: true
   # 插件目录（每个服务可单独覆盖）
   plugin_dir: /plugins/data/tide
   # 最大下载重试次数
@@ -262,16 +428,24 @@ defaults:
 
 services:
   - name: glean
+    enabled: true
     plugin_dir: /plugins/data/glean
     download_url: https://github.com/YellCatt/glean/releases/download/dev-latest/default.glean_linux_mipsle
 
   # 多服务示例（取消注释即可启用）
   # - name: another-service
+  #   enabled: true
   #   plugin_dir: /plugins/data/another
   #   download_url: https://example.com/releases/latest/another_linux_amd64
   #   update_interval: 3600
   #   max_retry: 10
   #   connect_timeout: "60s"
+
+  # 禁用某个服务示例（enabled: false）
+  # - name: disabled-service
+  #   enabled: false
+  #   plugin_dir: /plugins/data/disabled
+  #   download_url: https://example.com/disabled
 `
 
 func ensureConfig(path string) error {

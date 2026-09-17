@@ -50,6 +50,7 @@ type GlobalConfig struct {
 
 // ServiceBase 一组可覆盖的配置字段（指针区分"未设置"和"显式设为零值"）
 type ServiceBase struct {
+	Enabled            *bool    `yaml:"enabled"`
 	PluginDir          string   `yaml:"plugin_dir"`
 	BinaryName         string   `yaml:"binary_name"`
 	TmpName            string   `yaml:"tmp_name"`
@@ -74,7 +75,8 @@ type ServiceYAML struct {
 
 // 最终展开后的服务配置快照（所有字段都是具体值，无指针）
 type ServiceConfig struct {
-	Name string
+	Name    string
+	Enabled bool
 
 	PluginDir       string
 	BinaryName      string
@@ -111,7 +113,9 @@ func defaultBase() ServiceBase {
 	drd := Duration{10 * time.Second}
 	liid := Duration{10 * time.Second}
 	mr := 20
+	en := true
 	return ServiceBase{
+		Enabled:            &en,
 		PluginDir:          "",
 		BinaryName:         "",
 		TmpName:            "",
@@ -130,6 +134,9 @@ func defaultBase() ServiceBase {
 }
 
 func mergeBase(dst, src ServiceBase) ServiceBase {
+	if src.Enabled != nil {
+		dst.Enabled = src.Enabled
+	}
 	if src.PluginDir != "" {
 		dst.PluginDir = src.PluginDir
 	}
@@ -196,6 +203,7 @@ func (y ServiceYAML) ToConfig(defaults ServiceBase) (ServiceConfig, error) {
 
 	cfg := ServiceConfig{
 		Name:                    y.Name,
+		Enabled:                 *base.Enabled,
 		PluginDir:               base.PluginDir,
 		BinaryName:              binaryName,
 		TmpName:                 tmpName,

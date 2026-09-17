@@ -87,6 +87,9 @@ type Service struct {
 
 	logMu   sync.Mutex
 	logFile *os.File
+
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 func NewService(cfg ServiceConfig) *Service {
@@ -101,6 +104,9 @@ func NewService(cfg ServiceConfig) *Service {
 func (s *Service) Name() string { return s.Cfg.Name }
 
 func (s *Service) run(ctx context.Context) {
+	s.ctx, s.cancel = context.WithCancel(ctx)
+	defer s.cancel()
+
 	s.initLog()
 	s.running.Store(true)
 	s.currentDelay.Store(int64(s.Cfg.RestartDelay))
@@ -155,7 +161,13 @@ func (s *Service) run(ctx context.Context) {
 		return
 	}
 
-	s.mainLoop(ctx)
+	s.mainLoop(s.ctx)
+}
+
+func (s *Service) Stop() {
+	if s.cancel != nil {
+		s.cancel()
+	}
 }
 
 func (s *Service) startProgram() error {
